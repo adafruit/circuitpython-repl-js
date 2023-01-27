@@ -1,0 +1,29 @@
+{
+  "name": "@adafruit/circuitpython-repl-js",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "version": "1.0.0",
+  "description": "A JavaScript Module to help with interfacing to the REPL on CircuitPython Devices over serial",
+  "main": "repl.js",
+  "dependencies": {
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/adafruit/circuitpython-repl-js.git"
+  },
+  "keywords": [
+    "BLE",
+    "WebBluetooth"
+  ],
+  "author": "Melissa LeBlanc-Williams",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/adafruit/circuitpython-repl-js/issues"
+  },
+  "homepage": "https://github.com/adafruit/circuitpython-repl-js#readme"
+}
