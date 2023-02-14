@@ -5,7 +5,8 @@ const CHAR_BKSP = '\x08';
 const CHAR_TITLE_START = "\x1b]0;";
 const CHAR_TITLE_END = "\x1b\\";
 
-const LINE_ENDING = "\r\n";
+export const LINE_ENDING_CRLF = "\r\n";
+export const LINE_ENDING_LF = "\n";
 
 // Default timeouts in milliseconds (can be overridden with properties)
 const PROMPT_TIMEOUT = 10000;
@@ -22,6 +23,8 @@ export class REPL {
         this.promptCheckInterval = PROMPT_CHECK_INTERVAL;
         this.withholdTitle = false;
         this.serialTransmit = null;
+        this._inputLineEnding = LINE_ENDING_CRLF;   // The line ending the REPL returns
+        this._outputLineEnding = LINE_ENDING_LF;     // The line ending for the code result
         this._tokenQueue = [];
     }
 
@@ -39,6 +42,14 @@ export class REPL {
 
     _regexEscape(regexString) {
         return regexString.replace(/\\/, "\\\\");
+    }
+
+    setLineEnding(lineEnding) {
+        if (lineEnding != LINE_ENDING_CRLF && lineEnding != LINE_ENDING_LF) {
+            throw new Error("Line ending expected to be either be LINE_ENDING_CRLF or LINE_ENDING_LF")
+        }
+
+        this._outputLineEnding = lineEnding;
     }
 
     // This should help detect lines like ">>> ", but not ">>> 1+1"
@@ -137,15 +148,15 @@ export class REPL {
             // Run asynchronously to avoid blocking the serial receive
             this.checkPrompt();
 
-            if (this._currentSerialReceiveLine.includes(LINE_ENDING)) {
-                [codeline, this._currentSerialReceiveLine] = this._currentSerialReceiveLine.split(LINE_ENDING, 2);
+            if (this._currentSerialReceiveLine.includes(this._inputLineEnding)) {
+                [codeline, this._currentSerialReceiveLine] = this._currentSerialReceiveLine.split(this._inputLineEnding, 2);
             }
         }
 
         // Is it still running? Then we add to code output
         if (this._pythonCodeRunning && codeline.length > 0) {
             if (!codeline.match(/^\... /) && !codeline.match(/^>>> /)) {
-                this._codeOutput += codeline + LINE_ENDING;
+                this._codeOutput += codeline + this._outputLineEnding;
             }
         }
     }
