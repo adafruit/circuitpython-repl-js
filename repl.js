@@ -16,12 +16,12 @@ export class REPL {
     constructor() {
         this._pythonCodeRunning = false;
         this._codeOutput = '';
-        this._currentSerialReceiveLine = '';
+        this._serialOutputBuffer = '';
         this._checkingPrompt = false;
         this._titleMode = false;
         this.promptTimeout = PROMPT_TIMEOUT;
         this.promptCheckInterval = PROMPT_CHECK_INTERVAL;
-        this.withholdTitle = false;
+        this.title = '';
         this.serialTransmit = null;
         this._inputLineEnding = LINE_ENDING_CRLF;   // The line ending the REPL returns
         this._outputLineEnding = LINE_ENDING_LF;     // The line ending for the code result
@@ -37,7 +37,7 @@ export class REPL {
     }
 
     _currentLineIsPrompt() {
-        return this._currentSerialReceiveLine.match(/>>> $/);
+        return this._serialOutputBuffer.match(/>>> $/);
     }
 
     _regexEscape(regexString) {
@@ -71,13 +71,13 @@ export class REPL {
 
     async waitForPrompt() {
         this._pythonCodeRunning = true;
-        await this.getToPrompt();
 
         // Wait for a prompt
         try {
             await this._timeout(
                 async () => {
                     while (this._pythonCodeRunning) {
+                        await this.getToPrompt();
                         await this._sleep(100);
                     }
                 }, this.promptTimeout
@@ -134,40 +134,71 @@ export class REPL {
     async _processToken(token) {
         if (token == CHAR_TITLE_START) {
             this._titleMode = true;
-            this.setTitle("");
+            this._setTitle("");
         } else if (token == CHAR_TITLE_END) {
             this._titleMode = false;
         } else if (this._titleMode) {
-            this.setTitle(token, true);
+            this._setTitle(token, true);
         }
 
-        let codeline = '';
+        let codelines = [];
+        let codeline;
+        this._serialOutputBuffer += token;
         if (this._pythonCodeRunning) {
-            this._currentSerialReceiveLine += token;
-
             // Run asynchronously to avoid blocking the serial receive
             this.checkPrompt();
 
-            if (this._currentSerialReceiveLine.includes(this._inputLineEnding)) {
-                [codeline, this._currentSerialReceiveLine] = this._currentSerialReceiveLine.split(this._inputLineEnding, 2);
+            while (this._serialOutputBuffer.includes(this._inputLineEnding)) {
+                let bufferLines;
+                [codeline, ...bufferLines] = this._serialOutputBuffer.split(this._inputLineEnding);
+                this._serialOutputBuffer = bufferLines.join(this._inputLineEnding);
+                codelines.push(codeline);
             }
         }
 
         // Is it still running? Then we add to code output
-        if (this._pythonCodeRunning && codeline.length > 0) {
-            if (!codeline.match(/^\... /) && !codeline.match(/^>>> /)) {
-                this._codeOutput += codeline + this._outputLineEnding;
+        if (this._pythonCodeRunning && codelines.length > 0) {
+            for (codeline of codelines) {
+                if (!codeline.match(/^\... /) && !codeline.match(/^>>> /)) {
+                    this._codeOutput += codeline + this._outputLineEnding;
+                }
             }
         }
     }
 
     // Placeholder Function
     setTitle(title, append=false) {
+
+        return;
+    }
+
+    _setTitle(title, append=false) {
         if (append) {
             title = this.title + title;
         }
 
         this.title = title;
+
+        this.setTitle(title, append);
+    }
+
+    getVersion() {
+        return this._parseTitleInfo(/\| REPL \| (.*)$/);
+    }
+
+    getIpAddress() {
+        return this._parseTitleInfo(/((?:\d{1,3}\.){3}\d{1,3})/);
+    }
+
+    _parseTitleInfo(regex) {
+        if (this.title) {
+            let matches = this.title.match(regex);
+            if (matches && matches.length >= 2) {
+                return matches[1];
+            }
+        }
+
+        return null;
     }
 
     async _serialTransmit(msg) {
