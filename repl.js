@@ -93,8 +93,12 @@ export class REPL {
         await this.serialTransmit(CHAR_CTRL_D);
     }
 
-    async getToPrompt() {
+    async interruptCode() {
         await this.serialTransmit(CHAR_CTRL_C);
+    }
+
+    async getToPrompt() {
+        await this.serialTransmit(CHAR_CRLF);
     }
 
     async onSerialReceive(e) {
