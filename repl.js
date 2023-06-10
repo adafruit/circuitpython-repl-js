@@ -83,7 +83,7 @@ export class REPL {
                 }, this.promptTimeout
             );
         } catch (error) {
-            console.log("Awaiting prompt timed out.");
+            console.error("Awaiting prompt timed out.");
             return false;
         }
         return true;
