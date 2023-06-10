@@ -102,15 +102,17 @@ export class REPL {
     }
 
     async onSerialReceive(e) {
-        // Prepend a partial token if it exists
+        // We don't want to modify e.data, so we make a copy of it
+        let data = e.data;
 
+        // Prepend a partial token if it exists
         if (this._partialToken) {
-            e.data = this._partialToken + e.data;
+            data = this._partialToken + data;
             this._partialToken = null;
         }
 
         // Tokenize the larger string and send to the parent
-        let tokens = this._tokenize(e.data);
+        let tokens = this._tokenize(data);
 
         // Remove any partial tokens and store for the next serial data receive
         if (tokens.length && this._hasPartialToken(tokens.slice(-1))) {
