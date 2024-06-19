@@ -64,10 +64,13 @@ export class FileOps {
 
     async _checkReplErrors() {
         let error = this._repl.getErrorOutput();
-        if (error && error.type == "OSError" && error.errno == 30) {
-            this._isReadOnly = true;
-            // Throw an error if needed
-            await this._checkReadOnly();
+        if (error) {
+            console.error("Python Error - " + error.type + ": " + error.message);
+            if (error.type == "OSError" && error.errno == 30) {
+                this._isReadOnly = true;
+                // Throw an error if needed
+                await this._checkReadOnly();
+            }
         }
 
         return error;
@@ -162,11 +165,11 @@ with open("${path}", "rb") as f:
     async _readTextFile(path) {
         try {
             let code = `
-    with open("${path}", "r") as f:
-        print(f.read())
-    `;
+with open("${path}", "r") as f:
+    print(f.read())
+`;
             let result = await this._repl.execRawPasteMode(code);
-            if (this._checkReplErrors()) {
+            if (await this._checkReplErrors()) {
                 return null;
             }
 
