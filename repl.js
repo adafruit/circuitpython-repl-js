@@ -17,6 +17,7 @@ const MODE_RAWPASTE = 3;
 
 const TYPE_DIR = 16384;
 const TYPE_FILE = 32768;
+const DEBUG = false;
 
 export const LINE_ENDING_CRLF = "\r\n";
 export const LINE_ENDING_LF = "\n";
@@ -25,15 +26,11 @@ const CONTROL_SEQUENCES = [
     REGEX_RAW_PASTE_RESPONSE
 ];
 
-// TODO: The title occasionally has duplicate characters (such as 2 snakes). Likely the buffer pointers need adjusting.
-// TODO: Get Raw Mode working
-// TODO: Add parsing for non-english languages (alternatively, only look at symbols that are common across the languages)
-
 // Mostly needed when the terminal echos back the input
 const IGNORE_OUTPUT_LINE_PREFIXES = [/^\... /, /^>>> /];
 
 // Default timeouts in milliseconds (can be overridden with properties)
-const PROMPT_TIMEOUT = 10000;
+const PROMPT_TIMEOUT = 20000;
 const CODE_EXECUTION_TIMEOUT = 15000;
 const PROMPT_CHECK_INTERVAL = 50;
 
@@ -119,7 +116,7 @@ with open("${path}", "w") as f:
 
     // Write a file to the device path with contents beginning at offset. Modification time can be set and if raw is true, contents is written as binary
     async writeFile(path, contents, offset=0, modificationTime=null, raw=false) {
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
 
         if (raw) {
             await this._writeRawFile(path, contents, offset, modificationTime);
@@ -183,7 +180,7 @@ with open("${path}", "r") as f:
     // Read a file from the device
     async readFile(path, raw=false) {
         let result;
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
 
         if (raw) {
             result = await this._readRawFile(path);
@@ -198,7 +195,7 @@ with open("${path}", "r") as f:
     // List files using paste mode on the device returning the result as a javascript array
     // We need the file name, whether or not it is a directory, file size and file date
     async listDir(path) {
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
         // Mask sure path has a trailing slash
         if (path[path.length - 1] != "/") {
             path += "/";
@@ -231,7 +228,7 @@ for item in contents:
     }
 
     async isReadOnly() {
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
 
         let code = `
 import storage
@@ -246,7 +243,7 @@ print(storage.getmount("/").readonly)
 
     async makeDir(path, modificationTime=null) {
         await this._checkReadOnly();
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
         let code = `os.mkdir("${path}")\n`;
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
@@ -258,7 +255,7 @@ print(storage.getmount("/").readonly)
 
     async delete(path) {
         await this._checkReadOnly();
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
         let code = `
 import os
 
@@ -278,7 +275,7 @@ else:
         // we need to check if the new path already exists
         // Return true on success and false on failure
 
-        this._repl.terminalOutput = false;
+        this._repl.terminalOutput = DEBUG;
         let code = `
 import os
 os.rename("${oldPath}", "${newPath}")
@@ -453,7 +450,23 @@ export class REPL {
     }
 
     async interruptCode() {
-        await this.serialTransmit(CHAR_CTRL_C);
+        this._pythonCodeRunning = true;
+        // Wait for a prompt
+        try {
+            await this._timeout(
+                async () => {
+                    while (this._pythonCodeRunning) {
+                        await this.serialTransmit(CHAR_CTRL_C);
+                        await this.checkPrompt();
+                        await this._sleep(50);
+                    }
+                }, this.promptTimeout
+            );
+        } catch (error) {
+            console.error("Awaiting prompt timed out.");
+            return false;
+        }
+
     }
 
     getErrorOutput(raw = false) {
@@ -493,10 +506,10 @@ export class REPL {
     async getToPrompt() {
         // We use GetToPrompt to ensure we are at a known place before running code
         // This will get from Paste Mode or Running App to Normal Prompt
-        await this.serialTransmit(CHAR_CTRL_C + CHAR_CTRL_C);
+        await this.interruptCode();
         // This will get from Raw Paste or Raw Mode to Normal Prompt
         await this.serialTransmit(CHAR_CTRL_B + CHAR_CTRL_D + CHAR_CTRL_B);
-        this.mode = MODE_NORMAL;
+        this._mode = MODE_NORMAL;
     }
 
     async execRawMode(code) {
@@ -830,7 +843,8 @@ export class REPL {
     // Allows for supplied python code to be run on the device via the REPL in normal mode
     async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
         await this.getToPrompt();
-        return this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
+        let result = await this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
+        return result;
     }
 
     // Split a string up by full title start and end character sequences
