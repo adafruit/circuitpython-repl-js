@@ -843,8 +843,7 @@ export class REPL {
     // Allows for supplied python code to be run on the device via the REPL in normal mode
     async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
         await this.getToPrompt();
-        let result = await this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
-        return result;
+        return this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
     }
 
     // Split a string up by full title start and end character sequences
