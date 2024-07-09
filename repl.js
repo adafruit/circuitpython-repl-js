@@ -32,6 +32,7 @@ const IGNORE_OUTPUT_LINE_PREFIXES = [/^\... /, /^>>> /];
 // Default timeouts in milliseconds (can be overridden with properties)
 const PROMPT_TIMEOUT = 20000;
 const CODE_EXECUTION_TIMEOUT = 15000;
+const CODE_INTERRUPT_TIMEOUT = 1000;
 const PROMPT_CHECK_INTERVAL = 50;
 
 const REGEX_PROMPT_RAW_MODE = /raw REPL; CTRL-B to exit/;
@@ -343,9 +344,12 @@ export class REPL {
 
     _checkForModeChange() {
         let lines = this._getInputBufferLines();
+        // Scan through the buffer and keep changing modes as clues are found
         for (let line of lines) {
             if (line.match(REGEX_PROMPT_RAW_MODE)) {
                 this._mode = MODE_RAW;
+            } else if (this._currentLineIsNormalPrompt()) {
+                this._mode = MODE_NORMAL;
             }
         }
     }
@@ -457,13 +461,17 @@ export class REPL {
                 async () => {
                     while (this._pythonCodeRunning) {
                         await this.serialTransmit(CHAR_CTRL_C);
+                        await this.exitRawMode();
+                        this._checkForModeChange();
                         await this.checkPrompt();
-                        await this._sleep(50);
+                        await this._sleep(200);
                     }
-                }, this.promptTimeout
+                }, CODE_INTERRUPT_TIMEOUT
             );
         } catch (error) {
-            console.error("Awaiting prompt timed out.");
+            console.error("Awaiting code interruption timed out. Restarting device.");
+            // Can't determine the state, so restart device
+            await this.softRestart();
             return false;
         }
 
@@ -504,11 +512,17 @@ export class REPL {
     }
 
     async getToPrompt() {
+        // Figure out the current mode and change it if needed
+        this._checkForModeChange();
+
+        // these will exit Raw Paste Mode or Raw mode if needed, otherwise they do nothing
+        await this.exitRawPasteMode();
+        await this.exitRawMode();
+
         // We use GetToPrompt to ensure we are at a known place before running code
         // This will get from Paste Mode or Running App to Normal Prompt
         await this.interruptCode();
-        // This will get from Raw Paste or Raw Mode to Normal Prompt
-        await this.serialTransmit(CHAR_CTRL_B + CHAR_CTRL_D + CHAR_CTRL_B);
+
         this._mode = MODE_NORMAL;
     }
 
@@ -520,7 +534,6 @@ export class REPL {
 
     async execRawPasteMode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
         let success = await this.enterRawPasteMode();
-        //console.log("Success: " + success);
         if (success) {
             // We're in raw mode only
             await this.serialTransmit(code);
@@ -531,7 +544,7 @@ export class REPL {
             let remainingWindowSize = flowControlWindowSize;
             this._readSerialBytes(1); // Skip the last byte
             this._clearSerialBytes(); // Clear the serial buffer to remove the previous Raw Prompt
-            //console.log("Flow Control Window Size: " + remainingWindowSize);
+
             // Send the code in chunks up to the window size
             let codeLength = code.length;
             let codePointer = 0;
@@ -579,7 +592,7 @@ export class REPL {
                     }, codeTimeoutMs
                 );
             } catch (error) {
-                console.log("Code timed out.");
+                console.error("Code timed out.");
             }
         } else {
             // Run without timeout
@@ -678,9 +691,21 @@ export class REPL {
     }
 
     async exitRawMode() {
+        if (this._mode != MODE_RAW) {
+            return;
+        }
         await this.serialTransmit(CHAR_CTRL_B);
         // Wait for >>> to be displayed
-        this._mode = MODE_NORMAL;
+        await this._waitForModeChange(MODE_NORMAL);
+    }
+
+    async exitRawPasteMode() {
+        if (this._mode != MODE_RAWPASTE) {
+            return;
+        }
+        await this.serialTransmit(CHAR_CTRL_D);
+        await this._waitForModeChange(MODE_RAW);
+        //this._mode = MODE_RAW;
     }
 
     _getSerialCodeOutput() {
@@ -833,7 +858,7 @@ export class REPL {
 
     async _serialTransmit(msg) {
         if (!this.serialTransmit) {
-            console.log("Default serial transmit function called. Message: " + msg);
+            console.error("Default serial transmit function called. Message: " + msg);
             throw new Error("REPL serialTransmit must be connected to an external transmit function");
         } else {
             return await this.serialTransmit(msg);
@@ -842,8 +867,11 @@ export class REPL {
 
     // Allows for supplied python code to be run on the device via the REPL in normal mode
     async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
+        this.terminalOutput = DEBUG;
         await this.getToPrompt();
-        return this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
+        let result =  this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
+        this.terminalOutput = true;
+        return result;
     }
 
     // Split a string up by full title start and end character sequences
