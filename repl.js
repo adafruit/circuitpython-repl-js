@@ -211,7 +211,7 @@ for item in contents:
     print(item, result[0], result[6], result[9])
 `;
         const result = await this._repl.execRawMode(code);
-        console.log(result);
+
         let contents = [];
         if (!result) {
             return contents;
@@ -231,10 +231,13 @@ for item in contents:
 
     async isReadOnly() {
         this._repl.terminalOutput = DEBUG;
-
+        // MicroPython doesn't have storage, but also doesn't have a CIRCUITPY drive
         let code = `
-import storage
-print(storage.getmount("/").readonly)
+try:
+    import storage
+    print(storage.getmount("/").readonly)
+except:
+    print(False)
 `;
         let result = await this._repl.execRawMode(code);
         let isReadOnly = result.match("True") != null;
@@ -330,8 +333,9 @@ class InputBuffer {
     }
 
     getRemainingBuffer() {
+        // Let the result contain a slice of the buffer from the pointer to the end
         let result = this._buffer.slice(this._pointer);
-        this._pointer = this._buffer.length;
+        this._pointer += result.length;
         return result;
     }
 
@@ -361,8 +365,8 @@ class InputBuffer {
     }
 
     movePointer(offset) {
-        if (offset < 0) {
-            offset = 0;
+        if (offset < this._pointer) {
+            return;
         } else if (offset > this._buffer.length) {
             offset = this._buffer.length;
         }
@@ -380,12 +384,10 @@ class InputBuffer {
 
 export class REPL {
     constructor() {
-        // TODO: Review
         this._pythonCodeRunning = false;
         this._codeOutput = '';
         this._errorOutput = '';
         this._serialInputBuffer = new InputBuffer();
-        //this._commandBuffer = new InputBuffer();
         this._checkingPrompt = false;
         this._titleMode = false;
         this.promptTimeout = PROMPT_TIMEOUT;
@@ -401,6 +403,7 @@ export class REPL {
         this._checkpointCount = 0;
         this._rawByteCount = 0;
         this.terminalOutput = true;
+        this._codeCheckInProgress = false;
     }
 
     //// Placeholder Functions ////
@@ -413,6 +416,12 @@ export class REPL {
     }
 
     //// Utility Functions ////
+
+    _writeToTerminal(data) {
+        if (this.terminalOutput) {
+            this.writeToTerminal(data);
+        }
+    }
 
     _sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
@@ -493,7 +502,6 @@ export class REPL {
 
     _lineIsPrompt(prompt_regex) {
         let currentLine = this._serialInputBuffer.readLastLine();
-        console.log("Current Line: " + currentLine);
         if (!currentLine) {
             return false;
         }
@@ -522,19 +530,18 @@ export class REPL {
     }
 
     async _checkCodeRunning() {
-        // In raw mode, we simply need to look for OK
-        // Then we should store the results in the code output
         await this._detectCurrentMode();
         console.log("Checking code running");
         if (this._mode == MODE_RAW) {
+            // In raw mode, we simply need to look for OK
+            // Then we should store the results in the code output
+
             // The next bytes should be 1 of the following:
             // We receive OK, followed by code output, followed by Ctrl-D, followed by error output, followed by Ctrl-D
             // or we receive an error message
-            if (this._checkpointCount == 0) {
-                this._serialInputBuffer.readUntil(">");
-            }
             let bytes = this._serialInputBuffer.getRemainingBuffer();
             this._rawByteCount += bytes.length;
+
             if (this._rawByteCount >= 2) {
                 while (bytes.length > 0) {
                     if (this._checkpointCount == 0) {
@@ -542,29 +549,24 @@ export class REPL {
                             this._checkpointCount++;
                             bytes = bytes.slice(2);
                         } else {
-                            console.error("Error: " + bytes.slice(0, 2));
+                            console.error("Error: " + bytes);
                         }
                     } else {
                         if (bytes.slice(0, 1).match(CHAR_CTRL_D)) {
                             this._checkpointCount++;
-                            console.log("Checkpoint Count: " + this._checkpointCount);
+                            //console.log("Checkpoint Count: " + this._checkpointCount);
                         } else {
                             if (this._checkpointCount == 1) {
                                 // Code Output
                                 this._codeOutput += bytes.slice(0, 1);
-                                console.log("Code Output: " + bytes.slice(0,1));
+                                //console.log("Code Output: " + bytes.slice(0,1));
                             } else if (this._checkpointCount == 2) {
                                 // Error Output
                                 this._errorOutput += bytes.slice(0, 1);
-                                console.log("Error: " + bytes.slice(0,1));
+                                //console.log("Error: " + bytes.slice(0,1));
                             } else if (this._checkpointCount >= 2) {
                                 // We're done
-                                console.log("REPL at Raw Mode prompt");
                                 this._pythonCodeRunning = false;
-                            } else if (!this._pythonCodeRunning && bytes.slice(0, 1).match(">")) {
-                                // We're at a prompt
-                                console.log("> detected");
-                                return;
                             }
                         }
 
@@ -577,12 +579,11 @@ export class REPL {
         }
 
         // In normal mode, we need to look for the prompt
-
-        // Only allow one instance of this function to run at a time (unless this could cause it to miss a prompt)
         if (!!this._currentLineIsNormalPrompt()) {
             console.log("REPL at Normal Mode prompt");
             this._pythonCodeRunning = false;
         }
+        this._codeCheckInProgress = false;
     }
 
     _decodeError(rawError) {
@@ -634,7 +635,7 @@ export class REPL {
                 await this._timeout(
                     async () => {
                         while (this._pythonCodeRunning) {
-                            this._checkCodeRunning();
+                            await this._checkCodeRunning();
                             await this._sleep(100);
                         }
                     }, codeTimeoutMs
@@ -675,7 +676,7 @@ export class REPL {
         if (this._mode != MODE_RAW) {
             return;
         }
-        console.log("Exiting Raw Mode");
+
         await this.serialTransmit(CHAR_CTRL_B);
         // Wait for >>> to be displayed
         await this._waitForModeChange(MODE_NORMAL);
@@ -730,7 +731,7 @@ export class REPL {
         }
 
         this._serialInputBuffer.append(token);
-        this.writeToTerminal(token);
+        this._writeToTerminal(token);
     }
 
     //// External Functions ////
@@ -855,18 +856,14 @@ export class REPL {
     }
 
     async execRawMode(code) {
-        console.log("execRawMode");
         await this._enterRawMode();
         if (this._readUntil(REGEX_PROMPT_RAW_MODE)) {
-            if (this._readUntil(">")) {
-                console.log("Found prompt");
-            }
+            this._readUntil(">"); // Read until we get to the prompt
         }
 
         await this.serialTransmit(code);
         // Execute the code
         await this.serialTransmit(CHAR_CTRL_D);
-        console.log("Code sent\n" + code);
         this._checkpointCount = 0;
         this._rawByteCount = 0;
         this._pythonCodeRunning = true;
