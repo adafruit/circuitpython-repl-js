@@ -11,7 +11,7 @@ const MODE_RAW = 2;
 
 const TYPE_DIR = 16384;
 const TYPE_FILE = 32768;
-const DEBUG = true;
+const DEBUG = false;
 
 export const LINE_ENDING_CRLF = "\r\n";
 export const LINE_ENDING_LF = "\n";
@@ -507,7 +507,9 @@ export class REPL {
 
     async _checkCodeRunning() {
         await this._detectCurrentMode();
-        console.log("Checking code running in " + modes[this._mode]);
+        if (DEBUG) {
+            console.log("Checking if code is running in " + modes[this._mode]);
+        }
         if (this._mode == MODE_RAW) {
             // In raw mode, we simply need to look for OK
             // Then we should store the results in the code output
@@ -525,8 +527,9 @@ export class REPL {
                             this._checkpointCount++;
                             bytes = bytes.slice(2);
                         } else if (bytes.slice(0, 2).match("ra")) {
-                            console.log("Unexpected bytes encountered. Assuming code is not running.");
-                            this._pythonCodeRunning = false;
+                            if (DEBUG) {
+                                console.log("Unexpected bytes encountered. " + bytes);
+                            }
                             return;
                         } else {
                             console.error("Unexpected output in raw mode: " + bytes);
@@ -561,7 +564,9 @@ export class REPL {
 
         // In normal mode, we need to look for the prompt
         if (!!this._currentLineIsNormalPrompt()) {
-            console.log("REPL at Normal Mode prompt");
+            if (DEBUG) {
+                console.log("REPL at Normal Mode prompt");
+            }
             this._pythonCodeRunning = false;
         }
     }
@@ -609,7 +614,9 @@ export class REPL {
 
     async _waitForCodeExecution(codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
         // Wait for the code to finish running, so we can capture the output
-        console.log("Waiting for code execution");
+        if (DEBUG) {
+            console.log("Waiting for code execution");
+        }
         if (codeTimeoutMs) {
             try {
                 await this._timeout(
@@ -632,7 +639,9 @@ export class REPL {
     }
 
     async _waitForModeChange(mode, keySequence=null) {
-        console.log("Waiting for mode change from " + modes[this._mode] + " to " + modes[mode]);
+        if (DEBUG) {
+            console.log("Waiting for mode change from " + modes[this._mode] + " to " + modes[mode]);
+        }
         try {
             await this._timeout(
                 async () => {
@@ -763,7 +772,9 @@ export class REPL {
     }
 
     async interruptCode() {
-        console.log("Interrupting code");
+        if (DEBUG) {
+            console.log("Interrupting code");
+        }
         this._pythonCodeRunning = true;
         // Wait for code to be interrupted
         try {
