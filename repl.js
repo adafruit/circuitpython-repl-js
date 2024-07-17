@@ -4,7 +4,7 @@ const CHAR_CTRL_C = '\x03';
 const CHAR_CTRL_D = '\x04';
 const CHAR_TITLE_START = "\x1b]0;";
 const CHAR_TITLE_END = "\x1b\\";
-const REGEX_RAW_PASTE_RESPONSE = /R[\x00\x01]..\x01/;
+const CHAR_SNAKE = "🐍";
 
 const MODE_NORMAL = 1;
 const MODE_RAW = 2;
@@ -16,13 +16,6 @@ const DEBUG = true;
 export const LINE_ENDING_CRLF = "\r\n";
 export const LINE_ENDING_LF = "\n";
 
-const CONTROL_SEQUENCES = [
-    REGEX_RAW_PASTE_RESPONSE
-];
-
-// Mostly needed when the terminal echos back the input
-const IGNORE_OUTPUT_LINE_PREFIXES = [/^\... /, /^>>> /];
-
 // Default timeouts in milliseconds (can be overridden with properties)
 const PROMPT_TIMEOUT = 20000;
 const CODE_EXECUTION_TIMEOUT = 15000;
@@ -30,6 +23,7 @@ const CODE_INTERRUPT_TIMEOUT = 5000;
 const PROMPT_CHECK_INTERVAL = 50;
 
 const REGEX_PROMPT_RAW_MODE = /raw REPL; CTRL-B to exit/;
+const REGEX_PROMPT_NORMAL_MODE = />>> /;
 
 const modes = [
     "Unknown",
@@ -403,7 +397,6 @@ export class REPL {
         this._checkpointCount = 0;
         this._rawByteCount = 0;
         this.terminalOutput = true;
-        this._codeCheckInProgress = false;
     }
 
     //// Placeholder Functions ////
@@ -437,7 +430,7 @@ export class REPL {
 
     // Split a string up by full title start and end character sequences
     _tokenize(string) {
-        const tokenRegex = new RegExp("(" + this._regexEscape(CHAR_TITLE_START) + "|" + this._regexEscape(CHAR_TITLE_END) + "|" + this._regexEscape(CHAR_CTRL_D) + ")", "gi");
+        const tokenRegex = new RegExp("(" + this._regexEscape(CHAR_TITLE_START) + "|" + this._regexEscape(CHAR_TITLE_END) + ")", "gi");
         return string.split(tokenRegex);
     }
 
@@ -463,7 +456,7 @@ export class REPL {
         let buffer = this._serialInputBuffer.get();
 
         const rawModRegex = new RegExp(REGEX_PROMPT_RAW_MODE, 'g');
-        const normalModRegex = new RegExp(/>>> /g);
+        const normalModRegex = new RegExp(REGEX_PROMPT_NORMAL_MODE, 'g');
 
         let lastRawPosition = this._findLastRegexPosition(rawModRegex, buffer);
         let lastNormalPosition = this._findLastRegexPosition(normalModRegex, buffer);
@@ -512,26 +505,9 @@ export class REPL {
         return this._lineIsPrompt(/>>> $/);
     }
 
-    _currentLineIsPrompt() {
-        if (this._mode == MODE_NORMAL) {
-            return this._currentLineIsNormalPrompt();
-        }
-
-        return false;
-    }
-
-    async _processSerialData(data) {
-        // This should:
-        // check for mode change
-        // look for code output (and Ctrl + D)
-        // write to terminal
-
-        // This should not require a new line to be received to process the data
-    }
-
     async _checkCodeRunning() {
         await this._detectCurrentMode();
-        console.log("Checking code running");
+        console.log("Checking code running in " + modes[this._mode]);
         if (this._mode == MODE_RAW) {
             // In raw mode, we simply need to look for OK
             // Then we should store the results in the code output
@@ -548,8 +524,13 @@ export class REPL {
                         if (bytes.slice(0, 2).match("OK")) {
                             this._checkpointCount++;
                             bytes = bytes.slice(2);
+                        } else if (bytes.slice(0, 2).match("ra")) {
+                            console.log("Unexpected bytes encountered. Assuming code is not running.");
+                            this._pythonCodeRunning = false;
+                            return;
                         } else {
-                            console.error("Error: " + bytes);
+                            console.error("Unexpected output in raw mode: " + bytes);
+                            return;
                         }
                     } else {
                         if (bytes.slice(0, 1).match(CHAR_CTRL_D)) {
@@ -583,7 +564,6 @@ export class REPL {
             console.log("REPL at Normal Mode prompt");
             this._pythonCodeRunning = false;
         }
-        this._codeCheckInProgress = false;
     }
 
     _decodeError(rawError) {
@@ -651,16 +631,23 @@ export class REPL {
         }
     }
 
-    async _waitForModeChange(mode) {
+    async _waitForModeChange(mode, keySequence=null) {
         console.log("Waiting for mode change from " + modes[this._mode] + " to " + modes[mode]);
-        await this._timeout(
-            async () => {
-                while (this._mode != mode) {
-                    await this._detectCurrentMode();
-                    await this._sleep(100);
-                }
-            }, this.promptTimeout
-        );
+        try {
+            await this._timeout(
+                async () => {
+                    while (this._mode != mode) {
+                        if (keySequence) {
+                            await this.serialTransmit(keySequence);
+                        }
+                        await this._detectCurrentMode();
+                        await this._sleep(100);
+                    }
+                }, 1000
+            );
+        } catch (error) {
+            console.log("Awaiting mode change timed out.");
+        }
     }
 
     // Raw mode allows code execution without echoing back to the terminal
@@ -668,8 +655,7 @@ export class REPL {
         if (this._mode == MODE_RAW) {
             await this._exitRawMode();
         }
-        await this.serialTransmit(CHAR_CTRL_A);
-        await this._waitForModeChange(MODE_RAW);
+        await this._waitForModeChange(MODE_RAW, CHAR_CTRL_A);
     }
 
     async _exitRawMode() {
@@ -677,34 +663,8 @@ export class REPL {
             return;
         }
 
-        await this.serialTransmit(CHAR_CTRL_B);
         // Wait for >>> to be displayed
-        await this._waitForModeChange(MODE_NORMAL);
-    }
-
-    _getSerialCodeOutput() {
-        let bufferLines, codeline = '';
-        // Get the remaining buffer from _codeCheckPointer to the next line ending and update the position of the pointer
-        let remainingBuffer = this._serialInputBuffer.slice(this._codeCheckPointer);
-        if (remainingBuffer.includes(this._inputLineEnding)) {
-            [codeline, ...bufferLines] = remainingBuffer.split(this._inputLineEnding);
-            this._codeCheckPointer += codeline.length + this._inputLineEnding.length;
-        }
-        return this._formatCodeOutput(codeline);
-    }
-
-    _formatCodeOutput(codeline) {
-        // Remove lines that are prompts or control characters and strip control sequences
-        // Return the result
-        for (let prefix of IGNORE_OUTPUT_LINE_PREFIXES) {
-            if (codeline.match(prefix)) {
-                return '';
-            }
-        }
-        for (let sequence of CONTROL_SEQUENCES) {
-            codeline = codeline.replace(sequence, '');
-        }
-        return codeline;
+        await this._waitForModeChange(MODE_NORMAL, CHAR_CTRL_B);
     }
 
     async _processQueuedTokens() {
@@ -720,7 +680,6 @@ export class REPL {
 
     // Handle Title setting and add to the serial input buffer
     async _processToken(token) {
-        //console.log(token);
         if (token == CHAR_TITLE_START) {
             this._titleMode = true;
             this._setTitle("");
@@ -728,6 +687,12 @@ export class REPL {
             this._titleMode = false;
         } else if (this._titleMode) {
             this._setTitle(token, true);
+
+            // Fix duplicate Title charactes
+            let snakeIndex = this.title.indexOf(CHAR_SNAKE);
+            if (snakeIndex > -1) {
+                this._setTitle(this.title.slice(snakeIndex));
+            }
         }
 
         this._serialInputBuffer.append(token);
@@ -800,7 +765,7 @@ export class REPL {
     async interruptCode() {
         console.log("Interrupting code");
         this._pythonCodeRunning = true;
-        // Wait for a prompt
+        // Wait for code to be interrupted
         try {
             await this._timeout(
                 async () => {
@@ -812,7 +777,7 @@ export class REPL {
                 }, CODE_INTERRUPT_TIMEOUT
             );
         } catch (error) {
-            console.error("Awaiting code interruption timed out. Restarting device.");
+            console.log("Awaiting code interruption timed out. Restarting device.");
             // Can't determine the state, so restart device
             await this.softRestart();
             await this.serialTransmit(CHAR_CTRL_C);
