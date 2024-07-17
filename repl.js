@@ -2,18 +2,12 @@ const CHAR_CTRL_A = '\x01';
 const CHAR_CTRL_B = '\x02';
 const CHAR_CTRL_C = '\x03';
 const CHAR_CTRL_D = '\x04';
-const CHAR_CTRL_E = '\x05';
-const CHAR_CRLF = '\x0a\x0d';
-const CHAR_BKSP = '\x08';
 const CHAR_TITLE_START = "\x1b]0;";
 const CHAR_TITLE_END = "\x1b\\";
-const CHAR_RAW_PASTE_UNSUPPORTED = "R\x00";
-const CHAR_RAW_PASTE_SUPPORTED = "R\x01";
-const REGEX_RAW_PASTE_RESPONSE = /R[\x00\x01]..\x01/;
+const CHAR_SNAKE = "🐍";
 
 const MODE_NORMAL = 1;
 const MODE_RAW = 2;
-const MODE_RAWPASTE = 3;
 
 const TYPE_DIR = 16384;
 const TYPE_FILE = 32768;
@@ -22,20 +16,20 @@ const DEBUG = false;
 export const LINE_ENDING_CRLF = "\r\n";
 export const LINE_ENDING_LF = "\n";
 
-const CONTROL_SEQUENCES = [
-    REGEX_RAW_PASTE_RESPONSE
-];
-
-// Mostly needed when the terminal echos back the input
-const IGNORE_OUTPUT_LINE_PREFIXES = [/^\... /, /^>>> /];
-
 // Default timeouts in milliseconds (can be overridden with properties)
 const PROMPT_TIMEOUT = 20000;
 const CODE_EXECUTION_TIMEOUT = 15000;
-const CODE_INTERRUPT_TIMEOUT = 1000;
+const CODE_INTERRUPT_TIMEOUT = 5000;
 const PROMPT_CHECK_INTERVAL = 50;
 
 const REGEX_PROMPT_RAW_MODE = /raw REPL; CTRL-B to exit/;
+const REGEX_PROMPT_NORMAL_MODE = />>> /;
+
+const modes = [
+    "Unknown",
+    "Normal",
+    "Raw",
+];
 
 // Class to use python code to get file information
 // We want to do stuff like writing files, reading files, and listing files
@@ -95,7 +89,7 @@ with open("${path}", "wb") as f:
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
         }
-        await this._repl.execRawPasteMode(code);
+        await this._repl.execRawMode(code);
     }
 
     async _writeTextFile(path, contents, offset=0, modificationTime=null) {
@@ -112,7 +106,7 @@ with open("${path}", "w") as f:
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
         }
-        await this._repl.execRawPasteMode(code);
+        await this._repl.execRawMode(code);
     }
 
     // Write a file to the device path with contents beginning at offset. Modification time can be set and if raw is true, contents is written as binary
@@ -136,7 +130,7 @@ with open("${path}", "rb") as f:
     byte_string = f.read()
     print(binascii.b2a_base64(byte_string, False))
 `;
-            let result = await this._repl.execRawPasteMode(code);
+            let result = await this._repl.execRawMode(code);
             if (this._checkReplErrors()) {
                 return null;
             }
@@ -166,7 +160,7 @@ with open("${path}", "rb") as f:
 with open("${path}", "r") as f:
     print(f.read())
 `;
-            let result = await this._repl.execRawPasteMode(code);
+            let result = await this._repl.execRawMode(code);
             if (await this._checkReplErrors()) {
                 return null;
             }
@@ -210,7 +204,8 @@ for item in contents:
     result = os.stat("${path}" + item)
     print(item, result[0], result[6], result[9])
 `;
-        const result = await this._repl.execRawPasteMode(code);
+        const result = await this._repl.execRawMode(code);
+
         let contents = [];
         if (!result) {
             return contents;
@@ -230,12 +225,15 @@ for item in contents:
 
     async isReadOnly() {
         this._repl.terminalOutput = DEBUG;
-
+        // MicroPython doesn't have storage, but also doesn't have a CIRCUITPY drive
         let code = `
-import storage
-print(storage.getmount("/").readonly)
+try:
+    import storage
+    print(storage.getmount("/").readonly)
+except:
+    print(False)
 `;
-        let result = await this._repl.execRawPasteMode(code);
+        let result = await this._repl.execRawMode(code);
         let isReadOnly = result.match("True") != null;
         this._repl.terminalOutput = true;
 
@@ -249,7 +247,7 @@ print(storage.getmount("/").readonly)
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
         }
-        await this._repl.execRawPasteMode(code);
+        await this._repl.execRawMode(code);
         this._checkReplErrors();
         this._repl.terminalOutput = true;
     }
@@ -266,7 +264,7 @@ if stat[0] == ${TYPE_FILE}:
 else:
     os.rmdir("${path}")
 `;
-        await this._repl.execRawPasteMode(code);
+        await this._repl.execRawMode(code);
         this._checkReplErrors();
         this._repl.terminalOutput = true;
     }
@@ -281,10 +279,100 @@ else:
 import os
 os.rename("${oldPath}", "${newPath}")
 `;
-        await this._repl.execRawPasteMode(code);
+        await this._repl.execRawMode(code);
         let error = this._checkReplErrors();
         this._repl.terminalOutput = true;
         return !error;
+    }
+}
+
+class InputBuffer {
+    constructor() {
+        this._buffer = "";
+        this._pointer = 0;
+        this.lineEnding = LINE_ENDING_CRLF;
+    }
+
+    append(data) {
+        this._buffer += data;
+    }
+
+    get() {
+        return this._buffer;
+    }
+
+    clear() {
+        this._buffer = "";
+        this._pointer = 0;
+    }
+
+    readLine(advancePointer = true) {
+        let lines = this.getLines();
+        if (this._buffer.slice(this._pointer).length == 0) {
+            return null;
+        }
+        if (advancePointer) {
+            this._pointer += lines[0].length + this.lineEnding.length;
+        }
+        return lines[0];
+    }
+
+    readLastLine() {
+        let lines = this.getLines();
+        if (this._buffer.slice(this._pointer).length == 0) {
+            return null;
+        }
+
+        return lines[lines.length - 1];
+    }
+
+    getRemainingBuffer() {
+        // Let the result contain a slice of the buffer from the pointer to the end
+        let result = this._buffer.slice(this._pointer);
+        this._pointer += result.length;
+        return result;
+    }
+
+    readExactly(byteCount) {
+        let bytes = this._buffer.slice(this._pointer, this._pointer + byteCount);
+        this._pointer += byteCount;
+        return bytes;
+    }
+
+    readUntil(value) {
+        // Read bytes using until the value is found
+        let currentOffset = this._pointer;
+        let bytes = this.readExactly(1);
+        let newByte = ' ';
+        // Continue to read 1 byte at a time until the last x bytes match the value
+        while (!bytes.match(value) && newByte.length > 0) {
+            newByte = this.readExactly(1);
+            bytes += newByte;
+        }
+        if (newByte.length == 0) {
+            // Buffer end reached, reset the prompt check pointer to the end
+            this._pointer = currentOffset;
+            return false;
+        }
+
+        return true;
+    }
+
+    movePointer(offset) {
+        if (offset < this._pointer) {
+            return;
+        } else if (offset > this._buffer.length) {
+            offset = this._buffer.length;
+        }
+        this._pointer = offset;
+    }
+
+    getLines(allLines = false) {
+        let buffer = this._buffer;
+        if (!allLines) {
+            buffer = buffer.slice(this._pointer);
+        }
+        return buffer.split(this.lineEnding);
     }
 }
 
@@ -293,7 +381,7 @@ export class REPL {
         this._pythonCodeRunning = false;
         this._codeOutput = '';
         this._errorOutput = '';
-        this._serialInputBuffer = '';
+        this._serialInputBuffer = new InputBuffer();
         this._checkingPrompt = false;
         this._titleMode = false;
         this.promptTimeout = PROMPT_TIMEOUT;
@@ -303,11 +391,29 @@ export class REPL {
         this._inputLineEnding = LINE_ENDING_CRLF;   // The line ending the REPL returns
         this._outputLineEnding = LINE_ENDING_LF;     // The line ending for the code result
         this._tokenQueue = [];
-        this._mode = MODE_NORMAL;
+        this._mode = null;
         this._codeCheckPointer = 0; // Used for looking at code output
         this._promptCheckPointer = 0; // Used for looking at prompt output/control characters
-        this._ctrlDCount = 0;
+        this._checkpointCount = 0;
+        this._rawByteCount = 0;
         this.terminalOutput = true;
+    }
+
+    //// Placeholder Functions ////
+    setTitle(title, append=false) {
+        return;
+    }
+
+    writeToTerminal(data) {
+        return;
+    }
+
+    //// Utility Functions ////
+
+    _writeToTerminal(data) {
+        if (this.terminalOutput) {
+            this.writeToTerminal(data);
+        }
     }
 
     _sleep(ms) {
@@ -318,174 +424,156 @@ export class REPL {
         return Promise.race([callback(), this._sleep(ms).then(() => {throw Error("Timed Out");})]);
     }
 
-    _getControlCharBuffer() {
-        // Return the Serial Buffer from _controlCharPointer to the next line ending and update the position of the pointer
-        let bufferLines, controlChar = '';
-        let remainingBuffer = this._serialInputBuffer.slice(this._controlCharPointer);
-        if (remainingBuffer.includes(this._inputLineEnding)) {
-            [controlChar, ...bufferLines] = remainingBuffer.split(this._inputLineEnding);
-            this._controlCharPointer += controlChar.length + this._inputLineEnding.length;
-        }
-        return controlChar;
+    _regexEscape(regexString) {
+        return regexString.replace(/\\/, "\\\\");
     }
 
-    _getInputBufferLines() {
-        return this._serialInputBuffer.split(this._inputLineEnding);
+    // Split a string up by full title start and end character sequences
+    _tokenize(string) {
+        const tokenRegex = new RegExp("(" + this._regexEscape(CHAR_TITLE_START) + "|" + this._regexEscape(CHAR_TITLE_END) + ")", "gi");
+        return string.split(tokenRegex);
+    }
+
+    // Check if a chunk of data has a partial title start/end character sequence at the end
+    _hasPartialToken(chunk) {
+        const partialToken = /\\x1b(?:\](?:0"?)?)?$/gi;
+        return partialToken.test(chunk);
+    }
+
+    _parseTitleInfo(regex) {
+        if (this.title) {
+            let matches = this.title.match(regex);
+            if (matches && matches.length >= 2) {
+                return matches[1];
+            }
+        }
+
+        return null;
+    }
+
+    async _detectCurrentMode() {
+        // Go through the buffer and detect the last mode change
+        let buffer = this._serialInputBuffer.get();
+
+        const rawModRegex = new RegExp(REGEX_PROMPT_RAW_MODE, 'g');
+        const normalModRegex = new RegExp(REGEX_PROMPT_NORMAL_MODE, 'g');
+
+        let lastRawPosition = this._findLastRegexPosition(rawModRegex, buffer);
+        let lastNormalPosition = this._findLastRegexPosition(normalModRegex, buffer);
+
+        if (lastRawPosition > lastNormalPosition) {
+            this._mode = MODE_RAW;
+            this._serialInputBuffer.movePointer(lastRawPosition);
+        } else if (lastNormalPosition > lastRawPosition) {
+            this._mode = MODE_NORMAL;
+            this._serialInputBuffer.movePointer(lastNormalPosition);
+        }
+
+        // If no mode changes detected, we will assume normal mode with code running
+        if (!this._mode) {
+            await this.softRestart();
+            await this.serialTransmit(CHAR_CTRL_C);
+            await this._sleep(1000);
+        }
+    }
+
+    _findLastRegexPosition(regex, str) {
+        let match;
+        let lastPosition = -1;
+
+        // Reset regex.lastIndex to start from the end of the string
+        regex.lastIndex = 0;
+        // Using a loop to find all matches
+        while ((match = regex.exec(str)) !== null) {
+            lastPosition = match.index;
+            // Move to the next position after the match
+            regex.lastIndex = match.index + 1;
+        }
+
+        return lastPosition;
     }
 
     _lineIsPrompt(prompt_regex) {
-        let lines = this._getInputBufferLines();
-        if (lines.length == 0) {
+        let currentLine = this._serialInputBuffer.readLastLine();
+        if (!currentLine) {
             return false;
         }
-        let lastLine = lines[lines.length - 1];
-        return lastLine.match(prompt_regex);
-    }
-
-    _checkForModeChange() {
-        let lines = this._getInputBufferLines();
-        // Scan through the buffer and keep changing modes as clues are found
-        for (let line of lines) {
-            if (line.match(REGEX_PROMPT_RAW_MODE)) {
-                this._mode = MODE_RAW;
-            } else if (this._currentLineIsNormalPrompt()) {
-                this._mode = MODE_NORMAL;
-            }
-        }
+        return currentLine.match(prompt_regex);
     }
 
     _currentLineIsNormalPrompt() {
         return this._lineIsPrompt(/>>> $/);
     }
 
-    _currentLineIsPastePrompt() {
-        return this._lineIsPrompt(/=== $/);
-    }
-
-    _currentLineIsPrompt() {
-        if (this._mode == MODE_NORMAL) {
-            return this._currentLineIsNormalPrompt();
+    async _checkCodeRunning() {
+        await this._detectCurrentMode();
+        if (DEBUG) {
+            console.log("Checking if code is running in " + modes[this._mode]);
         }
+        if (this._mode == MODE_RAW) {
+            // In raw mode, we simply need to look for OK
+            // Then we should store the results in the code output
 
-        return false;
-    }
+            // The next bytes should be 1 of the following:
+            // We receive OK, followed by code output, followed by Ctrl-D, followed by error output, followed by Ctrl-D
+            // or we receive an error message
+            let bytes = this._serialInputBuffer.getRemainingBuffer();
+            this._rawByteCount += bytes.length;
 
-    _regexEscape(regexString) {
-        return regexString.replace(/\\/, "\\\\");
-    }
+            if (this._rawByteCount >= 2) {
+                while (bytes.length > 0) {
+                    if (this._checkpointCount == 0) {
+                        if (bytes.slice(0, 2).match("OK")) {
+                            this._checkpointCount++;
+                            bytes = bytes.slice(2);
+                        } else if (bytes.slice(0, 2).match("ra")) {
+                            if (DEBUG) {
+                                console.log("Unexpected bytes encountered. " + bytes);
+                            }
+                            return;
+                        } else {
+                            console.error("Unexpected output in raw mode: " + bytes);
+                            return;
+                        }
+                    } else {
+                        if (bytes.slice(0, 1).match(CHAR_CTRL_D)) {
+                            this._checkpointCount++;
+                            //console.log("Checkpoint Count: " + this._checkpointCount);
+                        } else {
+                            if (this._checkpointCount == 1) {
+                                // Code Output
+                                this._codeOutput += bytes.slice(0, 1);
+                                //console.log("Code Output: " + bytes.slice(0,1));
+                            } else if (this._checkpointCount == 2) {
+                                // Error Output
+                                this._errorOutput += bytes.slice(0, 1);
+                                //console.log("Error: " + bytes.slice(0,1));
+                            } else if (this._checkpointCount >= 2) {
+                                // We're done
+                                this._pythonCodeRunning = false;
+                            }
+                        }
 
-    setLineEnding(lineEnding) {
-        if (lineEnding != LINE_ENDING_CRLF && lineEnding != LINE_ENDING_LF) {
-            throw new Error("Line ending expected to be either be LINE_ENDING_CRLF or LINE_ENDING_LF")
-        }
-
-        this._outputLineEnding = lineEnding;
-    }
-
-    // This should help detect lines like ">>> ", but not ">>> 1+1"
-    async checkPrompt() {
-        if (this._mode == MODE_RAWPASTE) {
-            let bytes = this._serialInputBuffer.slice(this._promptCheckPointer);
-            this._promptCheckPointer += bytes.length;
-            while (bytes.length > 0) {
-                if (bytes.slice(0, 1).match(CHAR_CTRL_D)) {
-                    this._ctrlDCount++;
-                    //console.log("CTRL-D Count: " + this._ctrlDCount);
-                } else {
-                    if (this._ctrlDCount == 1) {
-                        // Code Output
-                        this._codeOutput += bytes.slice(0, 1);
-                    } else if (this._ctrlDCount == 2) {
-                        // Error Output
-                        this._errorOutput += bytes.slice(0, 1);
-                    } else if (this._ctrlDCount > 2) {
-                        // Code is done running
-                        this._pythonCodeRunning = false;
-                    } else if (!this._pythonCodeRunning && bytes.slice(0, 1).match(">")) {
-                        // We're at a prompt
-                        this._mode = MODE_RAW;
-                        return;
+                        bytes = bytes.slice(1); // Remove the first byte
                     }
                 }
-
-                bytes = bytes.slice(1); // Remove the first byte
             }
 
             return;
         }
 
-        // Only allow one instance of this function to run at a time (unless this could cause it to miss a prompt)
-        if (!this._currentLineIsPrompt()) {
-            return;
+        // In normal mode, we need to look for the prompt
+        if (!!this._currentLineIsNormalPrompt()) {
+            if (DEBUG) {
+                console.log("REPL at Normal Mode prompt");
+            }
+            this._pythonCodeRunning = false;
         }
-
-        // Check again after a short delay to see if it's still a prompt
-        await this._sleep(this.promptCheckInterval);
-
-        if (!this._currentLineIsPrompt()) {
-            return;
-        }
-
-        this._pythonCodeRunning = false;
     }
 
-    async waitForPrompt() {
-        this._pythonCodeRunning = true;
-
-        // Wait for a prompt
-        try {
-            await this._timeout(
-                async () => {
-                    while (this._pythonCodeRunning) {
-                        await this.getToPrompt();
-                        await this._sleep(100);
-                    }
-                }, this.promptTimeout
-            );
-        } catch (error) {
-            console.error("Awaiting prompt timed out.");
-            return false;
-        }
-        return true;
-    }
-
-    async softRestart() {
-        await this.serialTransmit(CHAR_CTRL_D);
-    }
-
-    async interruptCode() {
-        this._pythonCodeRunning = true;
-        // Wait for a prompt
-        try {
-            await this._timeout(
-                async () => {
-                    while (this._pythonCodeRunning) {
-                        await this.serialTransmit(CHAR_CTRL_C);
-                        await this.exitRawMode();
-                        this._checkForModeChange();
-                        await this.checkPrompt();
-                        await this._sleep(200);
-                    }
-                }, CODE_INTERRUPT_TIMEOUT
-            );
-        } catch (error) {
-            console.error("Awaiting code interruption timed out. Restarting device.");
-            // Can't determine the state, so restart device
-            await this.softRestart();
-            return false;
-        }
-
-    }
-
-    getErrorOutput(raw = false) {
-        if (raw) {
-            return this._errorOutput;
-        }
-        if (!this._errorOutput) {
-            return null;
-        }
-        let errorOutput = this._errorOutput;
-        let errorLines = errorOutput.split(this._inputLineEnding);
+    _decodeError(rawError) {
+        // Errors are typically 3 lines long
+        let errorLines = rawError.split(this._inputLineEnding);
         let error = {
             file: null,
             line: null,
@@ -503,90 +591,38 @@ export class REPL {
                 error.message = error.message.replace(/\[Errno \d+\] /, '');
             }
         }
-        error.raw = errorOutput;
+        error.raw = rawError;
         return error;
     }
 
-    getCodeOutput() {
-        return this._codeOutput;
-    }
-
-    async getToPrompt() {
-        // Figure out the current mode and change it if needed
-        this._checkForModeChange();
-
-        // these will exit Raw Paste Mode or Raw mode if needed, otherwise they do nothing
-        await this.exitRawPasteMode();
-        await this.exitRawMode();
-
-        // We use GetToPrompt to ensure we are at a known place before running code
-        // This will get from Paste Mode or Running App to Normal Prompt
-        await this.interruptCode();
-
-        this._mode = MODE_NORMAL;
-    }
-
-    async execRawMode(code) {
-        await this.enterRawMode();
-        await this.serialTransmit(code);
-        return await this.finishRawMode();
-    }
-
-    async execRawPasteMode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
-        let success = await this.enterRawPasteMode();
-        if (success) {
-            // We're in raw mode only
-            await this.serialTransmit(code);
-            // We need to use flow control
-            let flowControlWindowSize = this._readSerialBytes(2);
-            // Convert 2 bytes from unsigned little endian to an integer
-            flowControlWindowSize = flowControlWindowSize.charCodeAt(0) + (flowControlWindowSize.charCodeAt(1) << 8);
-            let remainingWindowSize = flowControlWindowSize;
-            this._readSerialBytes(1); // Skip the last byte
-            this._clearSerialBytes(); // Clear the serial buffer to remove the previous Raw Prompt
-
-            // Send the code in chunks up to the window size
-            let codeLength = code.length;
-            let codePointer = 0;
-            while (codePointer < codeLength) {
-                let chunk = code.slice(codePointer, codePointer + remainingWindowSize);
-                await this.serialTransmit(chunk);
-                codePointer += remainingWindowSize;
-                // Reduce the remain window size
-                remainingWindowSize -= chunk.length;
-                if (remainingWindowSize <= 0) {
-                    // Read the next byte at the flow control pointer
-                    let instruction = this._readSerialBytes(1);
-                    if (instruction.match(CHAR_CTRL_A)) {
-                        remainingWindowSize = flowControlWindowSize;
-                    } else if (instruction.match(CHAR_CTRL_D)) {
-                        // We're done
-                        break;
+    async _readUntil(value, timeout=5000) {
+        // Call readUntil in the SerialInputBuffer, but with a timeout wrapper
+        try {
+            await this._timeout(
+                async () => {
+                    while (!this._serialInputBuffer.readUntil(value)) {
+                        await this._sleep(100);
                     }
-                }
-            }
-            // Inform the device we're done
-            await this.serialTransmit(CHAR_CTRL_D);
-            this._ctrlDCount = 0;
-            this._pythonCodeRunning = true;
-            this._codeOutput = '';
-            this._errorOutput = '';
-            await this._waitForCodeExecution(codeTimeoutMs);
-            this._clearSerialBytes();
-            await this.exitRawMode();
-            return this._codeOutput.slice(Math.ceil(this._codeOutput.length / 2));
-        } else {
-            await this.execRawMode(code);
+                }, timeout
+            );
+        } catch (error) {
+            return false;
         }
+
+        return true;
     }
 
     async _waitForCodeExecution(codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
         // Wait for the code to finish running, so we can capture the output
+        if (DEBUG) {
+            console.log("Waiting for code execution");
+        }
         if (codeTimeoutMs) {
             try {
                 await this._timeout(
                     async () => {
                         while (this._pythonCodeRunning) {
+                            await this._checkCodeRunning();
                             await this._sleep(100);
                         }
                     }, codeTimeoutMs
@@ -602,136 +638,98 @@ export class REPL {
         }
     }
 
-    _readSerialBytes(byteCount, offset=null) {
-        if (offset == null) {
-            offset = this._promptCheckPointer;
+    async _waitForModeChange(mode, keySequence=null) {
+        if (DEBUG) {
+            console.log("Waiting for mode change from " + modes[this._mode] + " to " + modes[mode]);
         }
-        let bytes = this._serialInputBuffer.slice(offset, offset + byteCount);
-        this._promptCheckPointer += byteCount;
-        return bytes;
-    }
-
-    _clearSerialBytes(offset=null) {
-        // Should this only clear up to the lower of the 2 pointers? (codeCheckPointer and promptCheckPointer)
-        if (offset == null) {
-            offset = this._promptCheckPointer;
+        try {
+            await this._timeout(
+                async () => {
+                    while (this._mode != mode) {
+                        if (keySequence) {
+                            await this.serialTransmit(keySequence);
+                        }
+                        await this._detectCurrentMode();
+                        await this._sleep(100);
+                    }
+                }, 1000
+            );
+        } catch (error) {
+            console.log("Awaiting mode change timed out.");
         }
-        if (offset > this._serialInputBuffer.length) {
-            offset = this._serialInputBuffer.length;
-        }
-
-        this._serialInputBuffer = this._serialInputBuffer.slice(offset);
-        this._promptCheckPointer -= offset;
-        this._codeCheckPointer -= offset;
-    }
-
-    async enterRawPasteMode() {
-        await this.enterRawMode();
-        let bufferLength = this._serialInputBuffer.length;
-        await this.serialTransmit(CHAR_CTRL_E + "A" + CHAR_CTRL_A);
-        await this._timeout(
-            async () => {
-                while (this._serialInputBuffer.length < bufferLength + 2) {
-                    await this._sleep(100);
-                }
-            }, this.promptTimeout
-        );
-        if (this._serialInputBuffer.length < bufferLength + 2) {
-            console.error("Failed to enter raw paste mode.");
-            return;
-        }
-        // Grab the two characters after bufferLength
-        let response = this._readSerialBytes(2, bufferLength);
-
-        if (response.match(CHAR_RAW_PASTE_UNSUPPORTED)) {
-            console.error("Device does not support raw paste mode.");
-        } else if (response.match(CHAR_RAW_PASTE_SUPPORTED)) {
-            this._mode = MODE_RAWPASTE;
-            return true;
-        } else if (response == "ra") {
-            console.error("Device does not understand or support raw paste mode.");
-        }
-
-        return false;
-    }
-
-    // Execute pasted code
-    async finishRawMode() {
-        this._pythonCodeRunning = true;
-        this._codeOutput = '';
-        this._errorOutput = '';
-        await this.serialTransmit(CHAR_CTRL_D);
-
-        // Wait for the code to finish running, so we can capture the output
-        await this._waitForCodeExecution();
-
-        this._mode = MODE_NORMAL;
-        return this._codeOutput;
-    }
-
-    async _waitForModeChange(mode) {
-        await this._timeout(
-            async () => {
-                while (this._mode != mode) {
-                    this._checkForModeChange();
-                    await this._sleep(100);
-                }
-            }, this.promptTimeout
-        );
     }
 
     // Raw mode allows code execution without echoing back to the terminal
-    async enterRawMode() {
+    async _enterRawMode() {
         if (this._mode == MODE_RAW) {
-            return;
+            await this._exitRawMode();
         }
-        await this.getToPrompt();
-        await this.serialTransmit(CHAR_CTRL_A);
-        await this._waitForModeChange(MODE_RAW);
+        await this._waitForModeChange(MODE_RAW, CHAR_CTRL_A);
     }
 
-    async exitRawMode() {
+    async _exitRawMode() {
         if (this._mode != MODE_RAW) {
             return;
         }
-        await this.serialTransmit(CHAR_CTRL_B);
+
         // Wait for >>> to be displayed
-        await this._waitForModeChange(MODE_NORMAL);
+        await this._waitForModeChange(MODE_NORMAL, CHAR_CTRL_B);
     }
 
-    async exitRawPasteMode() {
-        if (this._mode != MODE_RAWPASTE) {
+    async _processQueuedTokens() {
+        if (this._processing) {
             return;
         }
-        await this.serialTransmit(CHAR_CTRL_D);
-        await this._waitForModeChange(MODE_RAW);
-        //this._mode = MODE_RAW;
-    }
-
-    _getSerialCodeOutput() {
-        let bufferLines, codeline = '';
-        // Get the remaining buffer from _codeCheckPointer to the next line ending and update the position of the pointer
-        let remainingBuffer = this._serialInputBuffer.slice(this._codeCheckPointer);
-        if (remainingBuffer.includes(this._inputLineEnding)) {
-            [codeline, ...bufferLines] = remainingBuffer.split(this._inputLineEnding);
-            this._codeCheckPointer += codeline.length + this._inputLineEnding.length;
+        this._processing = true;
+        while (this._tokenQueue.length) {
+            await this._processToken(this._tokenQueue.shift());
         }
-        return this._formatCodeOutput(codeline);
+        this._processing = false;
     }
 
-    _formatCodeOutput(codeline) {
-        // Remove lines that are prompts or control characters and strip control sequences
-        // Return the result
-        for (let prefix of IGNORE_OUTPUT_LINE_PREFIXES) {
-            if (codeline.match(prefix)) {
-                return '';
+    // Handle Title setting and add to the serial input buffer
+    async _processToken(token) {
+        if (token == CHAR_TITLE_START) {
+            this._titleMode = true;
+            this._setTitle("");
+        } else if (token == CHAR_TITLE_END) {
+            this._titleMode = false;
+        } else if (this._titleMode) {
+            this._setTitle(token, true);
+
+            // Fix duplicate Title charactes
+            let snakeIndex = this.title.indexOf(CHAR_SNAKE);
+            if (snakeIndex > -1) {
+                this._setTitle(this.title.slice(snakeIndex));
             }
         }
-        for (let sequence of CONTROL_SEQUENCES) {
-            codeline = codeline.replace(sequence, '');
-        }
-        return codeline;
+
+        this._serialInputBuffer.append(token);
+        this._writeToTerminal(token);
     }
+
+    //// External Functions ////
+
+    _setTitle(title, append=false) {
+        if (append) {
+            title = this.title + title;
+        }
+
+        this.title = title;
+
+        this.setTitle(title, append);
+    }
+
+    async _serialTransmit(msg) {
+        if (!this.serialTransmit) {
+            console.error("Default serial transmit function called. Message: " + msg);
+            throw new Error("REPL serialTransmit must be connected to an external transmit function");
+        } else {
+            return await this.serialTransmit(msg);
+        }
+    }
+
+    //// Public Functions ////
 
     async onSerialReceive(e) {
         // We tokenize the serial data to handle special character sequences (currently titles only)
@@ -757,84 +755,115 @@ export class REPL {
             this._tokenQueue.push(token);
         }
         await this._processQueuedTokens();
-        if (this.terminalOutput) {
-            return data;
-        }
-
-        return "";
     }
 
-    async _processQueuedTokens() {
-        if (this._processing) {
-            return;
-        }
-        this._processing = true;
-        while (this._tokenQueue.length) {
-            await this._processToken(this._tokenQueue.shift());
-        }
-        this._processing = false;
+    // Allows for supplied python code to be run on the device via the REPL in normal mode
+    async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
+        this.terminalOutput = DEBUG;
+
+        await this.getToPrompt();
+        let result =  this.execRawMode(code + LINE_ENDING_LF, codeTimeoutMs);
+        this.terminalOutput = true;
+        return result;
     }
 
-    async _processToken(token) {
-        if (token == CHAR_TITLE_START) {
-            this._titleMode = true;
-            //console.log("Title Start");
-            this._setTitle("");
-        } else if (token == CHAR_TITLE_END) {
-            //console.log("Title End");
-            this._titleMode = false;
-        } else if (this._titleMode) {
-            //console.log("New Title: " + token);
-            this._setTitle(token, true);
+    async softRestart() {
+        await this.serialTransmit(CHAR_CTRL_D);
+    }
+
+    async interruptCode() {
+        if (DEBUG) {
+            console.log("Interrupting code");
         }
-
-        let codelines = [];
-        let codeline;
-        this._serialInputBuffer += token;
-        if (this._pythonCodeRunning) {
-            // Check if we are at a prompt
-            this.checkPrompt(); // Run asynchronously to avoid blocking the serial receive
-
-            if (this._mode != MODE_RAWPASTE) {
-                do {
-                    codeline = this._getSerialCodeOutput();
-                    if (codeline) {
-                        codelines.push(codeline);
+        this._pythonCodeRunning = true;
+        // Wait for code to be interrupted
+        try {
+            await this._timeout(
+                async () => {
+                    while (this._pythonCodeRunning) {
+                        await this.serialTransmit(CHAR_CTRL_C);
+                        await this._checkCodeRunning();
+                        await this._sleep(200);
                     }
-                } while (codeline.length > 0);
-            }
+                }, CODE_INTERRUPT_TIMEOUT
+            );
+        } catch (error) {
+            console.log("Awaiting code interruption timed out. Restarting device.");
+            // Can't determine the state, so restart device
+            await this.softRestart();
+            await this.serialTransmit(CHAR_CTRL_C);
+            return false;
         }
 
-        // Is it still running? Then we add to code output if there is any
-        if (this._pythonCodeRunning && codelines.length > 0) {
-            for (codeline of codelines) {
-                //console.log(codeline);
-                if (!codeline.match(/^\... /) && !codeline.match(/^>>> /) && !codeline.match(/^=== /)) {
-                    if (this._mode != MODE_RAWPASTE) {
-                        if (codeline.match(REGEX_PROMPT_RAW_MODE)) {
-                            this._mode = MODE_RAW;
-                            continue;
-                        }
+    }
+
+    async waitForPrompt() {
+        this._pythonCodeRunning = true;
+
+        // Wait for a prompt
+        try {
+            await this._timeout(
+                async () => {
+                    while (this._pythonCodeRunning) {
+                        await this.getToPrompt();
+                        await this._sleep(100);
                     }
-                    this._codeOutput += codeline + this._outputLineEnding;
-                }
-            }
+                }, this.promptTimeout
+            );
+        } catch (error) {
+            console.error("Awaiting prompt timed out.");
+            return false;
         }
+        return true;
     }
 
-    // Placeholder Function
-    setTitle(title, append=false) {
-        return;
-    }
-
-    _setTitle(title, append=false) {
-        if (append) {
-            title = this.title + title;
+    async getToPrompt() {
+        // Attempt to figure out the current mode and change it if needed
+        while (!this._mode) {
+            await this._detectCurrentMode();
         }
 
-        this.title = title;
+        // these will exit Raw Paste Mode or Raw mode if needed, otherwise they do nothing
+        await this._exitRawMode();
 
-        this.setTitle(title, append);
+        // We use GetToPrompt to ensure we are at a known place before running code
+        // This will get from Paste Mode or Running App to Normal Prompt
+        await this.interruptCode();
+    }
+
+    async execRawMode(code) {
+        await this._enterRawMode();
+        if (this._readUntil(REGEX_PROMPT_RAW_MODE)) {
+            this._readUntil(">"); // Read until we get to the prompt
+        }
+
+        await this.serialTransmit(code);
+        // Execute the code
+        await this.serialTransmit(CHAR_CTRL_D);
+        this._checkpointCount = 0;
+        this._rawByteCount = 0;
+        this._pythonCodeRunning = true;
+        this._codeOutput = '';
+        this._errorOutput = '';
+        await this._waitForCodeExecution();
+
+        await this._exitRawMode();
+        return this._codeOutput;
+    }
+
+    getCodeOutput() {
+        return this._codeOutput;
+    }
+
+    getErrorOutput(raw = false) {
+        if (raw) {
+            return this._errorOutput;
+        }
+        if (!this._errorOutput) {
+            return null;
+        }
+
+        return this._decodeError(this._errorOutput);
     }
 
     getVersion() {
@@ -845,44 +874,11 @@ export class REPL {
         return this._parseTitleInfo(/((?:\d{1,3}\.){3}\d{1,3})/);
     }
 
-    _parseTitleInfo(regex) {
-        if (this.title) {
-            let matches = this.title.match(regex);
-            if (matches && matches.length >= 2) {
-                return matches[1];
-            }
+    setLineEnding(lineEnding) {
+        if (lineEnding != LINE_ENDING_CRLF && lineEnding != LINE_ENDING_LF) {
+            throw new Error("Line ending expected to be either be LINE_ENDING_CRLF or LINE_ENDING_LF")
         }
 
-        return null;
-    }
-
-    async _serialTransmit(msg) {
-        if (!this.serialTransmit) {
-            console.error("Default serial transmit function called. Message: " + msg);
-            throw new Error("REPL serialTransmit must be connected to an external transmit function");
-        } else {
-            return await this.serialTransmit(msg);
-        }
-    }
-
-    // Allows for supplied python code to be run on the device via the REPL in normal mode
-    async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
-        this.terminalOutput = DEBUG;
-        await this.getToPrompt();
-        let result =  this.execRawPasteMode(code + LINE_ENDING_LF, codeTimeoutMs);
-        this.terminalOutput = true;
-        return result;
-    }
-
-    // Split a string up by full title start and end character sequences
-    _tokenize(string) {
-        const tokenRegex = new RegExp("(" + this._regexEscape(CHAR_TITLE_START) + "|" + this._regexEscape(CHAR_TITLE_END) + "|" + this._regexEscape(CHAR_CTRL_D) + ")", "gi");
-        return string.split(tokenRegex);
-    }
-
-    // Check if a chunk of data has a partial title start/end character sequence at the end
-    _hasPartialToken(chunk) {
-        const partialToken = /\\x1b(?:\](?:0"?)?)?$/gi;
-        return partialToken.test(chunk);
+        this._outputLineEnding = lineEnding;
     }
 }
