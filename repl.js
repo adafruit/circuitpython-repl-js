@@ -8,6 +8,7 @@ const CHAR_SNAKE = "🐍";
 
 const MODE_NORMAL = 1;
 const MODE_RAW = 2;
+const MODE_PRE_PROMPT = 3;
 
 const TYPE_DIR = 16384;
 const TYPE_FILE = 32768;
@@ -24,11 +25,13 @@ const PROMPT_CHECK_INTERVAL = 50;
 
 const REGEX_PROMPT_RAW_MODE = /raw REPL; CTRL-B to exit/;
 const REGEX_PROMPT_NORMAL_MODE = />>> /;
+const REGEX_PRE_PROMPT = /Press any key to enter the REPL./;
 
 const modes = [
     "Unknown",
     "Normal",
     "Raw",
+    "Pre-Prompt",
 ];
 
 // Class to use python code to get file information
@@ -89,7 +92,7 @@ with open("${path}", "wb") as f:
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
         }
-        await this._repl.execRawMode(code);
+        await this._repl.runCode(code);
     }
 
     async _writeTextFile(path, contents, offset=0, modificationTime=null) {
@@ -106,7 +109,7 @@ with open("${path}", "w") as f:
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
         }
-        await this._repl.execRawMode(code);
+        await this._repl.runCode(code);
     }
 
     // Write a file to the device path with contents beginning at offset. Modification time can be set and if raw is true, contents is written as binary
@@ -130,7 +133,7 @@ with open("${path}", "rb") as f:
     byte_string = f.read()
     print(binascii.b2a_base64(byte_string, False))
 `;
-            let result = await this._repl.execRawMode(code);
+            let result = await this._repl.runCode(code);
             if (this._checkReplErrors()) {
                 return null;
             }
@@ -160,7 +163,7 @@ with open("${path}", "rb") as f:
 with open("${path}", "r") as f:
     print(f.read())
 `;
-            let result = await this._repl.execRawMode(code);
+            let result = await this._repl.runCode(code);
             if (await this._checkReplErrors()) {
                 return null;
             }
@@ -204,7 +207,7 @@ for item in contents:
     result = os.stat("${path}" + item)
     print(item, result[0], result[6], result[9])
 `;
-        const result = await this._repl.execRawMode(code);
+        const result = await this._repl.runCode(code);
 
         let contents = [];
         if (!result) {
@@ -233,7 +236,7 @@ try:
 except:
     print(False)
 `;
-        let result = await this._repl.execRawMode(code);
+        let result = await this._repl.runCode(code);
         let isReadOnly = result.match("True") != null;
         this._repl.terminalOutput = true;
 
@@ -247,7 +250,7 @@ except:
         if (modificationTime) {
             code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
         }
-        await this._repl.execRawMode(code);
+        await this._repl.runCode(code);
         this._checkReplErrors();
         this._repl.terminalOutput = true;
     }
@@ -264,7 +267,7 @@ if stat[0] == ${TYPE_FILE}:
 else:
     os.rmdir("${path}")
 `;
-        await this._repl.execRawMode(code);
+        await this._repl.runCode(code);
         this._checkReplErrors();
         this._repl.terminalOutput = true;
     }
@@ -279,7 +282,7 @@ else:
 import os
 os.rename("${oldPath}", "${newPath}")
 `;
-        await this._repl.execRawMode(code);
+        await this._repl.runCode(code);
         let error = this._checkReplErrors();
         this._repl.terminalOutput = true;
         return !error;
@@ -457,9 +460,21 @@ export class REPL {
 
         const rawModRegex = new RegExp(REGEX_PROMPT_RAW_MODE, 'g');
         const normalModRegex = new RegExp(REGEX_PROMPT_NORMAL_MODE, 'g');
+        const prePromptRegex = new RegExp(REGEX_PRE_PROMPT, 'g');
 
         let lastRawPosition = this._findLastRegexPosition(rawModRegex, buffer);
         let lastNormalPosition = this._findLastRegexPosition(normalModRegex, buffer);
+        let lastPrePromptPosition = this._findLastRegexPosition(prePromptRegex, buffer);
+
+        if (lastPrePromptPosition > lastNormalPosition && lastPrePromptPosition > lastRawPosition) {
+            this._mode = MODE_PRE_PROMPT;
+            if (DEBUG) {
+                console.log("Pre-Prompt Detected");
+            }
+            this._serialInputBuffer.movePointer(lastPrePromptPosition);
+            await this.serialTransmit(CHAR_CTRL_C);
+            return;
+        }
 
         if (lastRawPosition > lastNormalPosition) {
             this._mode = MODE_RAW;
@@ -471,6 +486,9 @@ export class REPL {
 
         // If no mode changes detected, we will assume normal mode with code running
         if (!this._mode) {
+            if (DEBUG) {
+                console.log("No mode detected. Restarting Device.");
+            }
             await this.softRestart();
             await this.serialTransmit(CHAR_CTRL_C);
             await this._sleep(1000);
@@ -568,6 +586,8 @@ export class REPL {
                 console.log("REPL at Normal Mode prompt");
             }
             this._pythonCodeRunning = false;
+        } else {
+            console.log("Normal Prompt not detected.");
         }
     }
 
@@ -652,7 +672,7 @@ export class REPL {
                         await this._detectCurrentMode();
                         await this._sleep(100);
                     }
-                }, 1000
+                }, 3000
             );
         } catch (error) {
             console.log("Awaiting mode change timed out.");
@@ -662,6 +682,9 @@ export class REPL {
     // Raw mode allows code execution without echoing back to the terminal
     async _enterRawMode() {
         if (this._mode == MODE_RAW) {
+            if (DEBUG) {
+                console.log("Already in Raw Mode");
+            }
             await this._exitRawMode();
         }
         await this._waitForModeChange(MODE_RAW, CHAR_CTRL_A);
@@ -725,6 +748,7 @@ export class REPL {
             console.error("Default serial transmit function called. Message: " + msg);
             throw new Error("REPL serialTransmit must be connected to an external transmit function");
         } else {
+            console.log("Transmitting: " + msg);
             return await this.serialTransmit(msg);
         }
     }
