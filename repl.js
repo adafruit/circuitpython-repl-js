@@ -82,6 +82,7 @@ export class FileOps {
         contents = btoa(byteString);  // Convert binary string to base64
 
         let code = `
+import os
 import binascii
 with open("${path}", "wb") as f:
     f.seek(${offset})
@@ -90,7 +91,8 @@ with open("${path}", "wb") as f:
 `;
 
         if (modificationTime) {
-            code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
+            modificationTime = Math.floor(modificationTime / 1000);
+            code += `os.utime("${path}", (${modificationTime}, ${modificationTime}))\n`;
         }
         await this._repl.runCode(code);
     }
@@ -101,28 +103,26 @@ with open("${path}", "wb") as f:
         contents = contents.replace(/"/g, '\\"');
 
         let code = `
+import os
 with open("${path}", "w") as f:
     f.seek(${offset})
     f.write("""${contents}""")
 `;
 
         if (modificationTime) {
-            code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
+            modificationTime = Math.floor(modificationTime / 1000);
+            code += `os.utime("${path}", (${modificationTime}, ${modificationTime}))\n`;
         }
         await this._repl.runCode(code);
     }
 
     // Write a file to the device path with contents beginning at offset. Modification time can be set and if raw is true, contents is written as binary
     async writeFile(path, contents, offset=0, modificationTime=null, raw=false) {
-        this._repl.terminalOutput = DEBUG;
-
         if (raw) {
             await this._writeRawFile(path, contents, offset, modificationTime);
         } else {
             await this._writeTextFile(path, contents, offset, modificationTime);
         }
-
-        this._repl.terminalOutput = true;
     }
 
     async _readRawFile(path) {
@@ -178,7 +178,6 @@ with open("${path}", "r") as f:
     // Read a file from the device
     async readFile(path, raw=false) {
         let result;
-        this._repl.terminalOutput = DEBUG;
 
         if (raw) {
             result = await this._readRawFile(path);
@@ -186,14 +185,12 @@ with open("${path}", "r") as f:
             result = await this._readTextFile(path);
         }
 
-        this._repl.terminalOutput = true;
         return result;
     }
 
     // List files using paste mode on the device returning the result as a javascript array
     // We need the file name, whether or not it is a directory, file size and file date
     async listDir(path) {
-        this._repl.terminalOutput = DEBUG;
         // Mask sure path has a trailing slash
         if (path[path.length - 1] != "/") {
             path += "/";
@@ -222,12 +219,10 @@ for item in contents:
                 fileDate: parseInt(fileDate) * 1000,
             });
         }
-        this._repl.terminalOutput = true;
         return contents;
     }
 
     async isReadOnly() {
-        this._repl.terminalOutput = DEBUG;
         // MicroPython doesn't have storage, but also doesn't have a CIRCUITPY drive
         let code = `
 try:
@@ -238,29 +233,28 @@ except:
 `;
         let result = await this._repl.runCode(code);
         let isReadOnly = result.match("True") != null;
-        this._repl.terminalOutput = true;
 
         return isReadOnly;
     }
 
     async makeDir(path, modificationTime=null) {
         await this._checkReadOnly();
-        this._repl.terminalOutput = DEBUG;
-        let code = `os.mkdir("${path}")\n`;
+        let code = `
+import os
+os.mkdir("${path}")
+`;
         if (modificationTime) {
-            code += `os.utime("${path}", (os.path.getatime("${path}"), ${modificationTime}))\n`;
+            modificationTime = Math.floor(modificationTime / 1000);
+            code += `os.utime("${path}", (${modificationTime}, ${modificationTime}))\n`;
         }
         await this._repl.runCode(code);
         this._checkReplErrors();
-        this._repl.terminalOutput = true;
     }
 
     async delete(path) {
         await this._checkReadOnly();
-        this._repl.terminalOutput = DEBUG;
         let code = `
 import os
-
 stat = os.stat("${path}")
 if stat[0] == ${TYPE_FILE}:
     os.remove("${path}")
@@ -269,7 +263,6 @@ else:
 `;
         await this._repl.runCode(code);
         this._checkReplErrors();
-        this._repl.terminalOutput = true;
     }
 
     async move(oldPath, newPath) {
@@ -277,14 +270,13 @@ else:
         // we need to check if the new path already exists
         // Return true on success and false on failure
 
-        this._repl.terminalOutput = DEBUG;
         let code = `
 import os
 os.rename("${oldPath}", "${newPath}")
 `;
         await this._repl.runCode(code);
         let error = this._checkReplErrors();
-        this._repl.terminalOutput = true;
+
         return !error;
     }
 }
@@ -786,7 +778,7 @@ export class REPL {
         this.terminalOutput = DEBUG;
 
         await this.getToPrompt();
-        let result =  this.execRawMode(code + LINE_ENDING_LF, codeTimeoutMs);
+        let result = await this.execRawMode(code + LINE_ENDING_LF, codeTimeoutMs);
         this.terminalOutput = true;
         return result;
     }
