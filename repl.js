@@ -542,7 +542,7 @@ export class REPL {
                             bytes = bytes.slice(2);
                         } else if (bytes.slice(0, 2).match("ra")) {
                             if (DEBUG) {
-                                console.error("Unexpected bytes encountered. " + bytes);
+                                console.log("Unexpected bytes encountered. " + bytes);
                             }
                             return;
                         } else {
