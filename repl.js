@@ -61,6 +61,7 @@ export class FileOps {
         let error = this._repl.getErrorOutput();
         if (error) {
             console.error("Python Error - " + error.type + ": " + error.message);
+            this._repl.writeErrorToTerminal(error.raw);
             if (error.type == "OSError" && error.errno == 30) {
                 this._isReadOnly = true;
                 // Throw an error if needed
@@ -228,7 +229,7 @@ for item in contents:
 try:
     import storage
     print(storage.getmount("/").readonly)
-except:
+except ImportError:
     print(False)
 `;
         let result = await this._repl.runCode(code);
@@ -411,6 +412,10 @@ export class REPL {
         }
     }
 
+    writeErrorToTerminal(data) {
+        this.writeToTerminal(`\x1b[91m${data}\x1b[0m`);
+    }
+
     _sleep(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
@@ -457,7 +462,6 @@ export class REPL {
         let lastRawPosition = this._findLastRegexPosition(rawModRegex, buffer);
         let lastNormalPosition = this._findLastRegexPosition(normalModRegex, buffer);
         let lastPrePromptPosition = this._findLastRegexPosition(prePromptRegex, buffer);
-
         if (lastPrePromptPosition > lastNormalPosition && lastPrePromptPosition > lastRawPosition) {
             this._mode = MODE_PRE_PROMPT;
             if (DEBUG) {
@@ -533,7 +537,7 @@ export class REPL {
             if (this._rawByteCount >= 2) {
                 while (bytes.length > 0) {
                     if (this._checkpointCount == 0) {
-                        if (bytes.slice(0, 2).match("OK")) {
+                        if (bytes.slice(0, 2).match("OK") || bytes.slice(0, 3).match(">OK")) {
                             this._checkpointCount++;
                             bytes = bytes.slice(2);
                         } else if (bytes.slice(0, 2).match("ra")) {
@@ -662,7 +666,7 @@ export class REPL {
                             await this.serialTransmit(keySequence);
                         }
                         await this._detectCurrentMode();
-                        await this._sleep(100);
+                        await this._sleep(250);
                     }
                 }, 3000
             );
@@ -774,8 +778,8 @@ export class REPL {
     }
 
     // Allows for supplied python code to be run on the device via the REPL in normal mode
-    async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT) {
-        this.terminalOutput = DEBUG;
+    async runCode(code, codeTimeoutMs=CODE_EXECUTION_TIMEOUT, showOutput=false) {
+        this.terminalOutput = DEBUG || showOutput;
 
         await this.getToPrompt();
         let result = await this.execRawMode(code + LINE_ENDING_LF, codeTimeoutMs);
