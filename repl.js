@@ -370,6 +370,10 @@ class InputBuffer {
         }
         return buffer.split(this.lineEnding);
     }
+
+    getPointerPosition() {
+        return this._pointer;
+    }
 }
 
 export class REPL {
@@ -537,7 +541,7 @@ export class REPL {
             if (this._rawByteCount >= 2) {
                 while (bytes.length > 0) {
                     if (this._checkpointCount == 0) {
-                        if (bytes.slice(0, 2).match("OK") || bytes.slice(0, 3).match(">OK")) {
+                        if (bytes.slice(0, 2).match("OK")) {
                             this._checkpointCount++;
                             bytes = bytes.slice(2);
                         } else if (bytes.slice(0, 2).match("ra")) {
