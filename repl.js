@@ -134,7 +134,7 @@ with open("${path}", "rb") as f:
     byte_string = f.read()
     print(binascii.b2a_base64(byte_string, False))
 `;
-console.log("Running code: ", code);
+
             let result = await this._repl.runCode(code);
             if (await this._checkReplErrors()) {
                 return null;
