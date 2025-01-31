@@ -134,13 +134,16 @@ with open("${path}", "rb") as f:
     byte_string = f.read()
     print(binascii.b2a_base64(byte_string, False))
 `;
+
             let result = await this._repl.runCode(code);
-            if (this._checkReplErrors()) {
+            if (await this._checkReplErrors()) {
                 return null;
             }
 
             // strip the b, ending newline, and quotes from the beginning and end
-            result = result.slice(2, -3);
+            let sliceStart = result.indexOf("b'") + 2;
+            let sliceEnd = result.lastIndexOf("'");
+            result = result.slice(sliceStart, sliceEnd);
 
             // convert the base64 string to an ArrayBuffer. Each byte of the Array buffer is a byte of the file with a value between 0-255
             result = atob(result);  // Convert base64 to binary string
@@ -249,7 +252,7 @@ os.mkdir("${path}")
             code += `os.utime("${path}", (${modificationTime}, ${modificationTime}))\n`;
         }
         await this._repl.runCode(code);
-        this._checkReplErrors();
+        await this._checkReplErrors();
     }
 
     async delete(path) {
@@ -263,7 +266,7 @@ else:
     os.rmdir("${path}")
 `;
         await this._repl.runCode(code);
-        this._checkReplErrors();
+        await this._checkReplErrors();
     }
 
     async move(oldPath, newPath) {
@@ -276,7 +279,7 @@ import os
 os.rename("${oldPath}", "${newPath}")
 `;
         await this._repl.runCode(code);
-        let error = this._checkReplErrors();
+        let error = await this._checkReplErrors();
 
         return !error;
     }
