@@ -209,19 +209,20 @@ for item in contents:
     print(item, result[0], result[6], result[9])
 `;
         const result = await this._repl.runCode(code);
-
         let contents = [];
         if (!result) {
             return contents;
         }
         for (let line of result.split("\n")) {
-            let [name, isDir, fileSize, fileDate] = line.split(" ");
-            contents.push({
-                path: name,
-                isDir: isDir == TYPE_DIR,
-                fileSize: parseInt(fileSize),
-                fileDate: parseInt(fileDate) * 1000,
-            });
+            if (line.length > 0) {
+                let [name, isDir, fileSize, fileDate] = line.split(" ");
+                contents.push({
+                    path: name,
+                    isDir: isDir == TYPE_DIR,
+                    fileSize: parseInt(fileSize),
+                    fileDate: parseInt(fileDate) * 1000,
+                });
+            }
         }
         return contents;
     }
