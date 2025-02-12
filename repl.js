@@ -101,6 +101,9 @@ with open("${path}", "wb") as f:
     async _writeTextFile(path, contents, offset=0, modificationTime=null) {
         // The contents needs to be converted from a UInt8Array to a string
         contents = String.fromCharCode.apply(null, contents);
+        // Preserve slashes and slash chracters (must be first)
+        contents = contents.replace(/\\/g, '\\\\');
+        // Preserve quotes
         contents = contents.replace(/"/g, '\\"');
 
         let code = `
@@ -163,17 +166,22 @@ with open("${path}", "rb") as f:
 
     async _readTextFile(path) {
         try {
+            // Read and print out the contents of the file within backtick delimiters
             let code = `
 with open("${path}", "r") as f:
-    print(f.read())
+    print("\`" + f.read() + "\`")
 `;
             let result = await this._repl.runCode(code);
             if (await this._checkReplErrors()) {
                 return null;
             }
 
-            // Remove last 2 bytes from the result because \r\n is added to the end
-            return result.slice(0, -2);
+            // Strip down to code within first and last backtick delimiters
+            let sliceStart = result.indexOf("`") + 1;
+            let sliceEnd = result.lastIndexOf("`");
+            result = result.slice(sliceStart, sliceEnd);
+
+            return result;
         } catch(error) {
             return null;
         }
