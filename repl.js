@@ -52,7 +52,7 @@ export class FileOps {
             this._isReadOnly = await this.isReadOnly();
         }
 
-        if (this._isReadOnly()) {
+        if (this._isReadOnly) {
             throw new Error("File System is Read Only. Try disabling or ejecting the drive.");
         }
     }
