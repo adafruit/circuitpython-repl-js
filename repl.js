@@ -22,6 +22,7 @@ const PROMPT_TIMEOUT = 20000;
 const CODE_EXECUTION_TIMEOUT = 15000;
 const CODE_INTERRUPT_TIMEOUT = 5000;
 const PROMPT_CHECK_INTERVAL = 50;
+const PARTIAL_TOKEN_TIMEOUT = 250;
 
 const REGEX_PROMPT_RAW_MODE = /raw REPL; CTRL-B to exit/;
 const REGEX_PROMPT_NORMAL_MODE = />>> /;
@@ -408,10 +409,11 @@ export class REPL {
         this._promptCheckPointer = 0; // Used for looking at prompt output/control characters
         this._checkpointCount = 0;
         this._rawByteCount = 0;
+        this._partialToken = null;
         this.terminalOutput = true;
     }
 
-    //// Placeholder Functions ////
+    //// Abstract Functions ////
     setTitle(title, append=false) {
         return;
     }
@@ -560,6 +562,11 @@ export class REPL {
                             if (DEBUG) {
                                 console.log("Unexpected bytes encountered. " + bytes);
                             }
+                            return;
+                        } else if (bytes.slice(0, 4) == CHAR_TITLE_START) {
+                            // Device was reset, wait for prompt
+                            await this.serialTransmit(CHAR_CTRL_C);
+                            await this.getToPrompt();
                             return;
                         } else {
                             console.error("Unexpected output in raw mode: " + bytes);
@@ -790,6 +797,8 @@ export class REPL {
         for (let token of tokens) {
             this._tokenQueue.push(token);
         }
+
+        // Process the queued tokens
         await this._processQueuedTokens();
     }
 
