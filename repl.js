@@ -896,6 +896,45 @@ export class REPL {
         return this._codeOutput;
     }
 
+    // Best-effort request to make CIRCUITPY writable from the REPL by taking
+    // its USB mass-storage drive offline. The underlying CircuitPython API is
+    // intentionally named "unsafe" because host writes in progress can corrupt
+    // the filesystem. Callers are responsible for deciding when it is safe to
+    // use and for restoring the drive when finished.
+    async tryDisableUsbDrive() {
+        const code = `
+try:
+    import storage
+    if hasattr(storage, "unsafe_disable_usb_drive"):
+        storage.unsafe_disable_usb_drive()
+        _disabled = True
+    else:
+        _disabled = False
+except Exception:
+    _disabled = False
+print("USB_DRIVE_DISABLED", _disabled)
+`;
+        const output = await this.runCode(code);
+        return /USB_DRIVE_DISABLED\s+True/.test(output || "");
+    }
+
+    // Reverse a successful tryDisableUsbDrive() call. Returns false when the
+    // firmware does not support changing USB mass storage after startup or the
+    // operation otherwise fails.
+    async enableUsbDrive() {
+        const code = `
+try:
+    import storage
+    storage.enable_usb_drive()
+    _enabled = True
+except Exception:
+    _enabled = False
+print("USB_DRIVE_ENABLED", _enabled)
+`;
+        const output = await this.runCode(code);
+        return /USB_DRIVE_ENABLED\s+True/.test(output || "");
+    }
+
     // Snapshot of the board's runtime state in a single round trip.
     // Returns { readOnly, usbConnected }. Each field is null when the
     // underlying CircuitPython attribute isn't available or the probe failed.
