@@ -342,6 +342,10 @@ class InputBuffer {
         return result;
     }
 
+    getRemainingByteCount() {
+        return this._buffer.length - this._pointer;
+    }
+
     readExactly(byteCount) {
         let bytes = this._buffer.slice(this._pointer, this._pointer + byteCount);
         this._pointer += byteCount;
@@ -538,7 +542,12 @@ export class REPL {
     }
 
     async _checkCodeRunning() {
-        await this._detectCurrentMode();
+        // Raw REPL responses are framed as OK, stdout, Ctrl-D, stderr,
+        // Ctrl-D, and a final prompt. While receiving that frame, printable
+        // output such as ">>> " must not be interpreted as a mode change.
+        if (this._mode != MODE_RAW) {
+            await this._detectCurrentMode();
+        }
         if (DEBUG) {
             console.log("Checking if code is running in " + modes[this._mode]);
         }
@@ -549,6 +558,13 @@ export class REPL {
             // The next bytes should be 1 of the following:
             // We receive OK, followed by code output, followed by Ctrl-D, followed by error output, followed by Ctrl-D
             // or we receive an error message
+            // Keep a partial OK acknowledgement in the input buffer until the
+            // second byte arrives. Serial receive boundaries may occur between
+            // any two protocol bytes.
+            if (this._checkpointCount == 0 && this._serialInputBuffer.getRemainingByteCount() < 2) {
+                return;
+            }
+
             let bytes = this._serialInputBuffer.getRemainingBuffer();
             this._rawByteCount += bytes.length;
 
