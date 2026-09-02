@@ -413,7 +413,8 @@ export class REPL {
         this._promptCheckPointer = 0; // Used for looking at prompt output/control characters
         this._checkpointCount = 0;
         this._rawByteCount = 0;
-        this._partialToken = null;
+        this._partialToken = "";
+        this._partialTokenTimeoutId = null;
         this.terminalOutput = true;
     }
 
@@ -456,10 +457,37 @@ export class REPL {
         return string.split(tokenRegex);
     }
 
-    // Check if a chunk of data has a partial title start/end character sequence at the end
-    _hasPartialToken(chunk) {
-        const partialToken = /\\x1b(?:\](?:0"?)?)?$/gi;
-        return partialToken.test(chunk);
+    // Return the longest suffix that could be the beginning of a title
+    // delimiter. Only this suffix needs to be held for the next serial chunk.
+    _getPartialTokenSuffix(data) {
+        const maxLength = Math.max(CHAR_TITLE_START.length, CHAR_TITLE_END.length) - 1;
+        for (let length = Math.min(maxLength, data.length); length > 0; length--) {
+            const suffix = data.slice(-length);
+            if (CHAR_TITLE_START.startsWith(suffix) || CHAR_TITLE_END.startsWith(suffix)) {
+                return suffix;
+            }
+        }
+        return "";
+    }
+
+    _clearPartialTokenTimeout() {
+        if (this._partialTokenTimeoutId !== null) {
+            clearTimeout(this._partialTokenTimeoutId);
+            this._partialTokenTimeoutId = null;
+        }
+    }
+
+    _schedulePartialTokenFlush() {
+        this._partialTokenTimeoutId = setTimeout(() => {
+            this._partialTokenTimeoutId = null;
+            if (!this._partialToken) {
+                return;
+            }
+
+            this._tokenQueue.push(this._partialToken);
+            this._partialToken = "";
+            this._processQueuedTokens();
+        }, PARTIAL_TOKEN_TIMEOUT);
     }
 
     _parseTitleInfo(regex) {
@@ -796,18 +824,24 @@ export class REPL {
         let data = e.data;
 
         // Prepend a partial token if it exists
+        this._clearPartialTokenTimeout();
         if (this._partialToken) {
             data = this._partialToken + data;
-            this._partialToken = null;
+            this._partialToken = "";
         }
 
-        // Tokenize the larger string and send to the parent
+        // Retain only an incomplete delimiter suffix. Process any ordinary
+        // output before it immediately so a partial title token cannot make
+        // unrelated output appear truncated.
+        const partialToken = this._getPartialTokenSuffix(data);
+        if (partialToken) {
+            this._partialToken = partialToken;
+            data = data.slice(0, -partialToken.length);
+            this._schedulePartialTokenFlush();
+        }
+
+        // Tokenize the complete data and send it to the parent
         let tokens = this._tokenize(data);
-
-        // Remove any partial tokens and store for the next serial data receive
-        if (tokens.length && this._hasPartialToken(tokens.slice(-1))) {
-            this._partialToken = tokens.pop();
-        }
 
         // Send only full tokens to the token queue
         for (let token of tokens) {
